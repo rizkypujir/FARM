@@ -155,8 +155,11 @@ async function runFarmOnce() {
   }
   console.log('');
 
-  if (tg.isEnabled() && !prev) {
-    await tg.sendMessage(`🚀 <b>Arc Farm cycle started</b>\nWallets: ${total} | Tasks/wallet: ${SEQUENCE.length} | Batch: ${BATCH_SIZE}`);
+  if (tg.isEnabled()) {
+    const msg = prev && doneSet.size > 0
+      ? `♻️ <b>Arc Farm cycle resumed</b>\nDone: ${doneSet.size}/${total} | Remaining: ${pending.length} | Batch: ${BATCH_SIZE}`
+      : `🚀 <b>Arc Farm cycle started</b>\nWallets: ${total} | Tasks/wallet: ${SEQUENCE.length} | Batch: ${BATCH_SIZE}`;
+    await tg.sendMessage(msg);
   }
 
   const spinner = ora({ text: 'starting...' }).start();
