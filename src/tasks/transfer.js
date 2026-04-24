@@ -8,12 +8,15 @@ function randomAddress() {
   return ethers.Wallet.createRandom().address;
 }
 
+const TX_TIMEOUT_MS = Number(process.env.TX_TIMEOUT_MS || 90000); // 90s default
+
 async function transferToken(wallet, tokenKey, to, amount) {
   const token = chain.tokens[tokenKey];
   const c = new ethers.Contract(token.address, erc20Abi, wallet);
   const value = ethers.parseUnits(String(amount), token.decimals);
   const tx = await c.transfer(to, value);
-  const rcpt = await tx.wait();
+  // wait(confirms, timeoutMs) — ethers v6: throw kalau tx gak confirmed dalam timeoutMs
+  const rcpt = await tx.wait(1, TX_TIMEOUT_MS);
   log(
     `tx:${tokenKey}`,
     `${shortAddr(wallet.address)} -> ${shortAddr(to)}  ${amount} ${token.symbol}  ${txUrl(tx.hash)}  block=${rcpt.blockNumber}`

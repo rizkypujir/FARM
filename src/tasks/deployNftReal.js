@@ -27,7 +27,7 @@ async function deployNftReal(wallet) {
   // mint 1 NFT ke wallet sendiri biar tx-nya lebih padat
   try {
     const mintTx = await contract.mint(wallet.address);
-    await mintTx.wait();
+    await mintTx.wait(1, Number(process.env.TX_TIMEOUT_MS || 90000));
     log('tx:mintNft', `${shortAddr(wallet.address)} mint #1 on ${shortAddr(addr)}  ${txUrl(mintTx.hash)}`);
   } catch (e) {
     log('tx:mintNft', `mint ERR: ${e.message}`);

@@ -17,7 +17,7 @@ async function deployMinimal(wallet) {
   const nonce = ethers.hexlify(ethers.randomBytes(4)).slice(2);
   const data = MINIMAL_INIT_CODE + nonce;
   const tx = await wallet.sendTransaction({ data });
-  const rcpt = await tx.wait();
+  const rcpt = await tx.wait(1, Number(process.env.TX_TIMEOUT_MS || 90000));
   log(
     'tx:deploy',
     `${shortAddr(wallet.address)} deployed -> ${shortAddr(rcpt.contractAddress || '')}  ${txUrl(tx.hash)}`

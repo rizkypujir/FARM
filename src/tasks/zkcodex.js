@@ -17,7 +17,7 @@ const FEE_COUNTER = ethers.parseEther('0.01'); // 0.01 USDC per increment
 // ===== Helpers =====
 async function sendRaw(wallet, { to, data, value = 0n, label }) {
   const tx = await wallet.sendTransaction({ to, data, value });
-  const rcpt = await tx.wait();
+  const rcpt = await tx.wait(1, Number(process.env.TX_TIMEOUT_MS || 90000));
   log(
     `tx:${label}`,
     `${shortAddr(wallet.address)} -> ${shortAddr(to)}  ${txUrl(tx.hash)}  block=${rcpt.blockNumber}`

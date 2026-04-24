@@ -11,7 +11,7 @@ async function approveToken(wallet, tokenKey, spender, amount) {
     ? ethers.MaxUint256
     : ethers.parseUnits(String(amount), token.decimals);
   const tx = await c.approve(spender, value);
-  const rcpt = await tx.wait();
+  const rcpt = await tx.wait(1, Number(process.env.TX_TIMEOUT_MS || 90000));
   log(
     `tx:approve`,
     `${shortAddr(wallet.address)} approve ${token.symbol} spender=${shortAddr(spender)}  ${txUrl(tx.hash)}`
