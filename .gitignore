@@ -5,6 +5,7 @@ wallets.addresses.txt
 test-wallet.txt
 logs/
 *.log
+.farm-progress.json
 artifacts/
 cache/
 typechain-types/

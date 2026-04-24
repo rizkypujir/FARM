@@ -1,4 +1,6 @@
 'use strict';
+const fs = require('fs');
+const path = require('path');
 const chalk = require('chalk');
 const ora = require('ora');
 const { ethers } = require('ethers');
@@ -7,6 +9,34 @@ const { loadWallets } = require('../wallets');
 const { shortAddr, randDelay, withRetry } = require('../utils');
 const { logFile } = require('../logger');
 const tg = require('../telegram');
+
+// Progress file — supaya cycle yang terputus bisa resume tanpa ulang wallet yang udah selesai.
+const PROGRESS_FILE = path.join(__dirname, '..', '..', '.farm-progress.json');
+
+function loadProgress(totalWallets) {
+  try {
+    if (!fs.existsSync(PROGRESS_FILE)) return null;
+    const p = JSON.parse(fs.readFileSync(PROGRESS_FILE, 'utf8'));
+    // Invalidate kalau wallet count beda (wallets.txt berubah) atau umur >24 jam
+    const ageH = (Date.now() - (p.startedAt || 0)) / 3600000;
+    if (p.total !== totalWallets || ageH > 24) return null;
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+function saveProgress(p) {
+  try {
+    fs.writeFileSync(PROGRESS_FILE, JSON.stringify(p, null, 2));
+  } catch (e) {
+    logFile('progress:err', 'save failed: ' + e.message);
+  }
+}
+
+function clearProgress() {
+  try { fs.unlinkSync(PROGRESS_FILE); } catch {}
+}
 const transfer = require('../tasks/transfer');
 const approve = require('../tasks/approve');
 const deploy = require('../tasks/deploy');
@@ -108,26 +138,43 @@ async function runFarmOnce() {
   const wallets = loadWallets();
   const total = wallets.length;
 
+  // Cek progress sebelumnya — resume kalau ada cycle yang belum selesai (<24h, wallet count sama)
+  const prev = loadProgress(total);
+  const doneSet = new Set(prev?.done || []);
+  const results = prev?.results || [];
+  const cycleStart = prev?.startedAt || Date.now();
+
   console.log('');
-  console.log(chalk.cyan(`Starting farming cycle — ${total} wallet(s) × ${SEQUENCE.length} tasks`));
+  if (prev && doneSet.size > 0) {
+    console.log(chalk.yellow(`Resuming cycle — ${doneSet.size}/${total} wallets already done (skip), continuing with ${total - doneSet.size}`));
+  } else {
+    console.log(chalk.cyan(`Starting farming cycle — ${total} wallet(s) × ${SEQUENCE.length} tasks`));
+  }
   console.log('');
 
-  if (tg.isEnabled()) {
+  if (tg.isEnabled() && !prev) {
     await tg.sendMessage(`🚀 <b>Arc Farm cycle started</b>\nWallets: ${total} | Tasks/wallet: ${SEQUENCE.length}`);
   }
 
   const spinner = ora({ text: 'starting...' }).start();
-  const results = [];
-  const cycleStart = Date.now();
+
+  // Save initial progress
+  saveProgress({ startedAt: cycleStart, total, done: Array.from(doneSet), results });
 
   for (let i = 0; i < total; i++) {
+    const addr = wallets[i].address;
+    if (doneSet.has(addr.toLowerCase())) {
+      continue; // already processed in previous run
+    }
     try {
       const r = await runWallet(wallets[i], i, total, spinner);
       results.push(r);
     } catch (e) {
-      results.push({ addr: wallets[i].address, ok: 0, fail: SEQUENCE.length, secs: '0', error: e.message });
-      logFile('wallet:err', `${wallets[i].address} :: ${e.message}`);
+      results.push({ addr, ok: 0, fail: SEQUENCE.length, secs: '0', error: e.message });
+      logFile('wallet:err', `${addr} :: ${e.message}`);
     }
+    doneSet.add(addr.toLowerCase());
+    saveProgress({ startedAt: cycleStart, total, done: Array.from(doneSet), results });
   }
 
   const totalOk = results.reduce((a, r) => a + r.ok, 0);
@@ -166,6 +213,9 @@ async function runFarmOnce() {
         `Duration: ${cycleSecs}s`
     );
   }
+
+  // Cycle selesai — bersihin progress file supaya cycle berikutnya start fresh
+  clearProgress();
 
   return { totalOk, totalFail, fullyOk, total, cycleSecs };
 }
