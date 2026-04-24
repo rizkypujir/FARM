@@ -163,9 +163,14 @@ async function runFarmOnce() {
 
   for (let i = 0; i < total; i++) {
     const addr = wallets[i].address;
-    if (doneSet.has(addr.toLowerCase())) {
-      continue; // already processed in previous run
+    const key = addr.toLowerCase();
+    if (doneSet.has(key)) {
+      continue; // already processed (or in-progress) in previous run
     }
+    // Pre-register: kalau process dibunuh di tengah wallet ini, restart auto-skip
+    // wallet ini (treat as failed) dan lanjut ke berikutnya — bukan ulang dari wallet 1.
+    doneSet.add(key);
+    saveProgress({ startedAt: cycleStart, total, done: Array.from(doneSet), results });
     try {
       const r = await runWallet(wallets[i], i, total, spinner);
       results.push(r);
@@ -173,7 +178,6 @@ async function runFarmOnce() {
       results.push({ addr, ok: 0, fail: SEQUENCE.length, secs: '0', error: e.message });
       logFile('wallet:err', `${addr} :: ${e.message}`);
     }
-    doneSet.add(addr.toLowerCase());
     saveProgress({ startedAt: cycleStart, total, done: Array.from(doneSet), results });
   }
 
