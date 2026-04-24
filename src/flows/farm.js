@@ -1,6 +1,8 @@
 'use strict';
 const chalk = require('chalk');
 const ora = require('ora');
+const { ethers } = require('ethers');
+const chain = require('../../config/chain');
 const { loadWallets } = require('../wallets');
 const { shortAddr, randDelay, withRetry } = require('../utils');
 const { logFile } = require('../logger');
@@ -17,6 +19,9 @@ const SELF_EURC = process.env.SELF_TX_AMOUNT_EURC || '0.001';
 const DELAY_MIN = Number(process.env.DELAY_MIN_MS || 1500);
 const DELAY_MAX = Number(process.env.DELAY_MAX_MS || 4000);
 const COUNTER_PER_CYCLE = Number(process.env.COUNTER_PER_CYCLE || 3);
+// Minimal USDC (= gas token Arc) yang harus dipunyai wallet untuk jalanin task.
+// Kalau kurang, skip wallet supaya gak stuck retry di task yang butuh balance.
+const MIN_USDC_FARM = process.env.MIN_USDC_FARM || '0.05';
 
 // Urutan task penuh (sequential per wallet)
 const SEQUENCE = [
@@ -50,11 +55,33 @@ function silenceConsole() {
   };
 }
 
+const ERC20_ABI = ['function balanceOf(address) view returns (uint256)'];
+
+async function checkWalletFunded(wallet) {
+  try {
+    const usdc = new ethers.Contract(chain.tokens.USDC.address, ERC20_ABI, wallet.provider);
+    const bal = await usdc.balanceOf(wallet.address);
+    const min = ethers.parseUnits(MIN_USDC_FARM, 6);
+    return { funded: bal >= min, balance: ethers.formatUnits(bal, 6) };
+  } catch (e) {
+    // Kalau RPC error, anggap funded aja biar tetap dicoba
+    return { funded: true, balance: '?' };
+  }
+}
+
 async function runWallet(wallet, idx, total, spinner) {
   const base = `${idx + 1}/${total} ${shortAddr(wallet.address)}`;
   let ok = 0;
   let fail = 0;
   const t0 = Date.now();
+
+  // Preflight: skip wallet yang saldo USDC di bawah minimum
+  spinner.text = `${base}  checking balance...`;
+  const chk = await checkWalletFunded(wallet);
+  if (!chk.funded) {
+    logFile('wallet:skip', `${wallet.address} skipped: USDC=${chk.balance} < ${MIN_USDC_FARM}`);
+    return { ok: 0, fail: 0, skipped: true, secs: '0.0', addr: wallet.address, balance: chk.balance };
+  }
 
   for (let i = 0; i < SEQUENCE.length; i++) {
     const t = SEQUENCE[i];
@@ -105,28 +132,36 @@ async function runFarmOnce() {
 
   const totalOk = results.reduce((a, r) => a + r.ok, 0);
   const totalFail = results.reduce((a, r) => a + r.fail, 0);
+  const skipped = results.filter((r) => r.skipped).length;
+  const active = total - skipped;
   const cycleSecs = ((Date.now() - cycleStart) / 1000).toFixed(1);
-  const fullyOk = results.filter((r) => r.fail === 0).length;
+  const fullyOk = results.filter((r) => !r.skipped && r.fail === 0).length;
 
   spinner.stopAndPersist({
     symbol: totalFail === 0 ? chalk.green('✔') : chalk.yellow('!'),
-    text: `Cycle done  ${fullyOk}/${total} wallets fully ok  |  ok=${totalOk} fail=${totalFail}  |  ${cycleSecs}s`,
+    text: `Cycle done  ${fullyOk}/${active} active wallets fully ok  |  skipped=${skipped}  ok=${totalOk} fail=${totalFail}  |  ${cycleSecs}s`,
   });
 
   console.log('');
   results.forEach((r, i) => {
     const idx = String(i + 1).padStart(2);
-    const mark = r.fail === 0 ? chalk.green('✔') : chalk.yellow('!');
-    console.log(
-      `  ${mark} ${idx}  ${shortAddr(r.addr)}  ok=${r.ok} fail=${r.fail}  (${r.secs}s)`
-    );
+    let mark, line;
+    if (r.skipped) {
+      mark = chalk.gray('○');
+      line = `  ${mark} ${idx}  ${shortAddr(r.addr)}  ${chalk.gray(`SKIPPED (USDC=${r.balance} < ${MIN_USDC_FARM})`)}`;
+    } else {
+      mark = r.fail === 0 ? chalk.green('✔') : chalk.yellow('!');
+      line = `  ${mark} ${idx}  ${shortAddr(r.addr)}  ok=${r.ok} fail=${r.fail}  (${r.secs}s)`;
+    }
+    console.log(line);
   });
   console.log('');
 
   if (tg.isEnabled()) {
     await tg.sendMessage(
       `🏁 <b>Arc Farm cycle done</b>\n` +
-        `${fullyOk}/${total} wallets fully ok\n` +
+        `${fullyOk}/${active} active wallets fully ok\n` +
+        `Skipped (low balance): ${skipped}\n` +
         `Total ok: ${totalOk} | fail: ${totalFail}\n` +
         `Duration: ${cycleSecs}s`
     );
