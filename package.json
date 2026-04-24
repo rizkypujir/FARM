@@ -1,0 +1,28 @@
+{
+  "name": "arc-testnet-farm",
+  "version": "1.0.0",
+  "description": "Multi-wallet farming & tx generator for Arc Testnet (Circle L1)",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/menu.js",
+    "menu": "node src/menu.js",
+    "balance": "node src/tasks/balance.js",
+    "farm": "node src/runner.js",
+    "bridge": "node src/bridge/cctp.js",
+    "compile": "hardhat compile",
+    "deploy:erc20": "node src/tasks/deployErc20Real.js",
+    "deploy:nft": "node src/tasks/deployNftReal.js"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.2.1",
+    "chalk": "^4.1.2",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.2",
+    "ora": "^5.4.1"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.22.10"
+  }
+}
