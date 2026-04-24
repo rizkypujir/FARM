@@ -1,6 +1,7 @@
 node_modules/
 .env
 wallets.txt
+wallets.addresses.txt
 logs/
 *.log
 artifacts/
