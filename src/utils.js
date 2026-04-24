@@ -64,14 +64,26 @@ function isTransient(err) {
   return TRANSIENT_PATTERNS.some((p) => msg.includes(p.toLowerCase()));
 }
 
-async function withRetry(fn, { retries = 3, baseDelayMs = 2000, label = 'op' } = {}) {
+function withTimeout(promise, ms, label = 'op') {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timeout after ${ms}ms: ${label}`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function withRetry(fn, { retries = 3, baseDelayMs = 2000, label = 'op', timeoutMs } = {}) {
+  // Default 300s: cukup untuk task multi-tx (mis. zkCounter×3 @90s each). Single-tx task
+  // biasanya selesai <10s — timeout ini cuma safety net untuk RPC hang.
+  const taskTimeout = timeoutMs || Number(process.env.TASK_TIMEOUT_MS || 300000);
   let lastErr;
   for (let i = 0; i <= retries; i++) {
     try {
-      return await fn();
+      return await withTimeout(Promise.resolve().then(fn), taskTimeout, label);
     } catch (e) {
       lastErr = e;
-      if (i === retries || !isTransient(e)) throw e;
+      const isTimeout = /timeout after \d+ms/.test(e?.message || '');
+      if (i === retries || (!isTransient(e) && !isTimeout)) throw e;
       const wait = baseDelayMs * Math.pow(2, i) + Math.floor(Math.random() * 1000);
       log('retry', `${label} attempt ${i + 1}/${retries} failed (${e.shortMessage || e.message}). retrying in ${wait}ms`);
       await sleep(wait);
@@ -80,4 +92,4 @@ async function withRetry(fn, { retries = 3, baseDelayMs = 2000, label = 'op' } =
   throw lastErr;
 }
 
-module.exports = { sleep, randInt, randDelay, pick, shortAddr, txUrl, log, randomName, withRetry, isTransient };
+module.exports = { sleep, randInt, randDelay, pick, shortAddr, txUrl, log, randomName, withRetry, withTimeout, isTransient };
