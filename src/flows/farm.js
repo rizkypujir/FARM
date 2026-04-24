@@ -52,6 +52,9 @@ const COUNTER_PER_CYCLE = Number(process.env.COUNTER_PER_CYCLE || 3);
 // Minimal USDC (= gas token Arc) yang harus dipunyai wallet untuk jalanin task.
 // Kalau kurang, skip wallet supaya gak stuck retry di task yang butuh balance.
 const MIN_USDC_FARM = process.env.MIN_USDC_FARM || '0.05';
+// Jumlah wallet yang jalan bareng dalam 1 batch. Default 5 — aman untuk RPC publik.
+// Naikin kalau pakai RPC private (Alchemy/QuickNode) dengan rate limit tinggi.
+const BATCH_SIZE = Number(process.env.BATCH_SIZE || 5);
 
 // Urutan task penuh (sequential per wallet)
 const SEQUENCE = [
@@ -75,7 +78,8 @@ const SEQUENCE = [
   { name: `zkCounter×${COUNTER_PER_CYCLE}`, fn: (w) => zk.zkCounterMany(w, COUNTER_PER_CYCLE) },
 ];
 
-function silenceConsole() {
+// Install sekali di level cycle — parallel-safe. Semua console.log task -> log file.
+function installSilencer() {
   const orig = { log: console.log, error: console.error };
   console.log = (...a) => logFile('task', a.map(String).join(' '));
   console.error = (...a) => logFile('task:err', a.map(String).join(' '));
@@ -94,19 +98,18 @@ async function checkWalletFunded(wallet) {
     const min = ethers.parseUnits(MIN_USDC_FARM, 6);
     return { funded: bal >= min, balance: ethers.formatUnits(bal, 6) };
   } catch (e) {
-    // Kalau RPC error, anggap funded aja biar tetap dicoba
     return { funded: true, balance: '?' };
   }
 }
 
-async function runWallet(wallet, idx, total, spinner) {
-  const base = `${idx + 1}/${total} ${shortAddr(wallet.address)}`;
+// Parallel-safe: tidak sentuh spinner, tidak install silencer per-wallet.
+// Caller (runFarmOnce) yang install silencer sekali di awal cycle.
+async function runWallet(wallet, onTask) {
+  const short = shortAddr(wallet.address);
   let ok = 0;
   let fail = 0;
   const t0 = Date.now();
 
-  // Preflight: skip wallet yang saldo USDC di bawah minimum
-  spinner.text = `${base}  checking balance...`;
   const chk = await checkWalletFunded(wallet);
   if (!chk.funded) {
     logFile('wallet:skip', `${wallet.address} skipped: USDC=${chk.balance} < ${MIN_USDC_FARM}`);
@@ -115,17 +118,14 @@ async function runWallet(wallet, idx, total, spinner) {
 
   for (let i = 0; i < SEQUENCE.length; i++) {
     const t = SEQUENCE[i];
-    spinner.text = `${base}  [${i + 1}/${SEQUENCE.length}] ${t.name}`;
-    const restore = silenceConsole();
+    if (onTask) onTask({ addr: wallet.address, taskIdx: i + 1, taskTotal: SEQUENCE.length, taskName: t.name });
     try {
-      await withRetry(() => t.fn(wallet), { retries: 3, baseDelayMs: 3000, label: `${shortAddr(wallet.address)}:${t.name}` });
+      await withRetry(() => t.fn(wallet), { retries: 3, baseDelayMs: 3000, label: `${short}:${t.name}` });
       ok++;
       logFile('task:ok', `${wallet.address} ${t.name}`);
     } catch (e) {
       fail++;
       logFile('task:fail', `${wallet.address} ${t.name} :: ${e.shortMessage || e.message}`);
-    } finally {
-      restore();
     }
     if (i < SEQUENCE.length - 1) await randDelay(DELAY_MIN, DELAY_MAX);
   }
@@ -144,42 +144,75 @@ async function runFarmOnce() {
   const results = prev?.results || [];
   const cycleStart = prev?.startedAt || Date.now();
 
+  // Ambil daftar wallet yang belum diproses
+  const pending = wallets.filter((w) => !doneSet.has(w.address.toLowerCase()));
+
   console.log('');
   if (prev && doneSet.size > 0) {
-    console.log(chalk.yellow(`Resuming cycle — ${doneSet.size}/${total} wallets already done (skip), continuing with ${total - doneSet.size}`));
+    console.log(chalk.yellow(`Resuming cycle — ${doneSet.size}/${total} wallets already done, ${pending.length} remaining`));
   } else {
-    console.log(chalk.cyan(`Starting farming cycle — ${total} wallet(s) × ${SEQUENCE.length} tasks`));
+    console.log(chalk.cyan(`Starting farming cycle — ${total} wallet(s) × ${SEQUENCE.length} tasks  |  batch=${BATCH_SIZE} parallel`));
   }
   console.log('');
 
   if (tg.isEnabled() && !prev) {
-    await tg.sendMessage(`🚀 <b>Arc Farm cycle started</b>\nWallets: ${total} | Tasks/wallet: ${SEQUENCE.length}`);
+    await tg.sendMessage(`🚀 <b>Arc Farm cycle started</b>\nWallets: ${total} | Tasks/wallet: ${SEQUENCE.length} | Batch: ${BATCH_SIZE}`);
   }
 
   const spinner = ora({ text: 'starting...' }).start();
+  const restoreConsole = installSilencer();
 
   // Save initial progress
   saveProgress({ startedAt: cycleStart, total, done: Array.from(doneSet), results });
 
-  for (let i = 0; i < total; i++) {
-    const addr = wallets[i].address;
-    const key = addr.toLowerCase();
-    if (doneSet.has(key)) {
-      continue; // already processed (or in-progress) in previous run
-    }
-    // Pre-register: kalau process dibunuh di tengah wallet ini, restart auto-skip
-    // wallet ini (treat as failed) dan lanjut ke berikutnya — bukan ulang dari wallet 1.
-    doneSet.add(key);
+  // Track per-wallet task progress untuk spinner text
+  const liveTasks = new Map(); // addr -> { taskIdx, taskName }
+  const batches = Math.ceil(pending.length / BATCH_SIZE);
+  let batchIdx = 0;
+  let walletsDoneInCycle = 0;
+
+  const renderSpinner = () => {
+    const live = [...liveTasks.entries()]
+      .map(([addr, t]) => `${shortAddr(addr)}[${t.taskIdx}/${t.taskTotal}]`)
+      .join(' ');
+    spinner.text = `Batch ${batchIdx}/${batches}  done=${doneSet.size}/${total}  active: ${live || '-'}`;
+  };
+
+  for (let b = 0; b < pending.length; b += BATCH_SIZE) {
+    batchIdx++;
+    const batch = pending.slice(b, b + BATCH_SIZE);
+
+    // Pre-register semua wallet di batch — kalau process mati, semua batch ini auto-skip saat restart
+    for (const w of batch) doneSet.add(w.address.toLowerCase());
     saveProgress({ startedAt: cycleStart, total, done: Array.from(doneSet), results });
-    try {
-      const r = await runWallet(wallets[i], i, total, spinner);
-      results.push(r);
-    } catch (e) {
-      results.push({ addr, ok: 0, fail: SEQUENCE.length, secs: '0', error: e.message });
-      logFile('wallet:err', `${addr} :: ${e.message}`);
+
+    renderSpinner();
+
+    const onTask = (info) => {
+      liveTasks.set(info.addr, info);
+      renderSpinner();
+    };
+
+    // Jalankan batch paralel
+    const settled = await Promise.allSettled(batch.map((w) => runWallet(w, onTask)));
+
+    for (let k = 0; k < batch.length; k++) {
+      const w = batch[k];
+      liveTasks.delete(w.address);
+      const s = settled[k];
+      if (s.status === 'fulfilled') {
+        results.push(s.value);
+      } else {
+        results.push({ addr: w.address, ok: 0, fail: SEQUENCE.length, secs: '0', error: s.reason?.message });
+        logFile('wallet:err', `${w.address} :: ${s.reason?.message}`);
+      }
+      walletsDoneInCycle++;
     }
+
     saveProgress({ startedAt: cycleStart, total, done: Array.from(doneSet), results });
   }
+
+  restoreConsole();
 
   const totalOk = results.reduce((a, r) => a + r.ok, 0);
   const totalFail = results.reduce((a, r) => a + r.fail, 0);
