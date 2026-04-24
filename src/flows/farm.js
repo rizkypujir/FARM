@@ -52,9 +52,10 @@ const COUNTER_PER_CYCLE = Number(process.env.COUNTER_PER_CYCLE || 3);
 // Minimal USDC (= gas token Arc) yang harus dipunyai wallet untuk jalanin task.
 // Kalau kurang, skip wallet supaya gak stuck retry di task yang butuh balance.
 const MIN_USDC_FARM = process.env.MIN_USDC_FARM || '0.05';
-// Jumlah wallet yang jalan bareng dalam 1 batch. Default 5 — aman untuk RPC publik.
-// Naikin kalau pakai RPC private (Alchemy/QuickNode) dengan rate limit tinggi.
-const BATCH_SIZE = Number(process.env.BATCH_SIZE || 5);
+// Jumlah wallet yang jalan bareng dalam 1 batch. Default 3 — aman untuk RPC publik (drpc).
+// Naikin ke 5-10 kalau pakai RPC private (Alchemy/QuickNode) dengan rate limit tinggi.
+// Note: tiap wallet jalanin 14 task, jadi batch=3 = 3 tx concurrent ke RPC saja, bukan 14×3.
+const BATCH_SIZE = Number(process.env.BATCH_SIZE || 3);
 
 // Urutan task penuh (sequential per wallet)
 const SEQUENCE = [
@@ -102,6 +103,17 @@ async function checkWalletFunded(wallet) {
   }
 }
 
+// Cek saldo EURC untuk decide apakah task EURC bisa dijalankan
+async function getEurcBalance(wallet) {
+  try {
+    const eurc = new ethers.Contract(chain.tokens.EURC.address, ERC20_ABI, wallet.provider);
+    const bal = await eurc.balanceOf(wallet.address);
+    return bal;
+  } catch {
+    return 0n;
+  }
+}
+
 // Parallel-safe: tidak sentuh spinner, tidak install silencer per-wallet.
 // Caller (runFarmOnce) yang install silencer sekali di awal cycle.
 async function runWallet(wallet, onTask) {
@@ -116,9 +128,27 @@ async function runWallet(wallet, onTask) {
     return { ok: 0, fail: 0, skipped: true, secs: '0.0', addr: wallet.address, balance: chk.balance };
   }
 
+  // EURC preflight — kalau saldo EURC < 0.002 (butuh untuk 2 transfer 0.001 + buffer),
+  // skip task yang requires EURC supaya gak buang waktu retry yang pasti revert.
+  const eurcBal = await getEurcBalance(wallet);
+  const eurcMinNeeded = ethers.parseUnits('0.002', 6);
+  const hasEurc = eurcBal >= eurcMinNeeded;
+  if (!hasEurc) {
+    logFile('wallet:eurc', `${wallet.address} EURC=${ethers.formatUnits(eurcBal, 6)} -> EURC tasks akan di-skip`);
+  }
+  const eurcRequiredTasks = new Set(['selfTransferEurc', 'randomTransferEurc']);
+
   for (let i = 0; i < SEQUENCE.length; i++) {
     const t = SEQUENCE[i];
     if (onTask) onTask({ addr: wallet.address, taskIdx: i + 1, taskTotal: SEQUENCE.length, taskName: t.name });
+
+    // Skip task yang butuh EURC kalau saldo kurang
+    if (!hasEurc && eurcRequiredTasks.has(t.name)) {
+      logFile('task:skip', `${wallet.address} ${t.name} (no EURC balance)`);
+      if (i < SEQUENCE.length - 1) await randDelay(DELAY_MIN, DELAY_MAX);
+      continue;
+    }
+
     try {
       await withRetry(() => t.fn(wallet), { retries: 3, baseDelayMs: 3000, label: `${short}:${t.name}` });
       ok++;
