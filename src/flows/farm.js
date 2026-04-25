@@ -198,55 +198,55 @@ async function runFarmOnce() {
   // Save initial progress
   saveProgress({ startedAt: cycleStart, total, done: Array.from(doneSet), results });
 
-  // Track per-wallet task progress untuk spinner text
-  const liveTasks = new Map(); // addr -> { taskIdx, taskName }
-  const batches = Math.ceil(pending.length / BATCH_SIZE);
-  let batchIdx = 0;
-  // Counter real-completed untuk display (beda dari doneSet yang include pre-registered).
-  // Start dari jumlah wallet yang sudah selesai di cycle sebelumnya (resume case).
-  let completed = doneSet.size;
+  // Sliding-window pool: selalu jaga BATCH_SIZE wallet jalan paralel.
+  // Begitu 1 selesai, langsung mulai wallet berikutnya (gak nunggu seluruh batch).
+  const liveTasks = new Map(); // addr -> { taskIdx, taskName, taskTotal }
+  let completed = doneSet.size; // counter real-completed untuk display
+  let nextIdx = 0; // index wallet berikutnya di `pending` yang mau di-spawn
+  const concurrency = Math.min(BATCH_SIZE, pending.length);
 
   const renderSpinner = () => {
     const live = [...liveTasks.entries()]
       .map(([addr, t]) => `${shortAddr(addr)}[${t.taskIdx}/${t.taskTotal}]`)
       .join(' ');
-    spinner.text = `Batch ${batchIdx}/${batches}  done=${completed}/${total}  active: ${live || '-'}`;
+    spinner.text = `done=${completed}/${total}  pool=${liveTasks.size}/${concurrency}  active: ${live || '-'}`;
   };
 
-  for (let b = 0; b < pending.length; b += BATCH_SIZE) {
-    batchIdx++;
-    const batch = pending.slice(b, b + BATCH_SIZE);
-
-    // Pre-register semua wallet di batch — kalau process mati, semua batch ini auto-skip saat restart
-    for (const w of batch) doneSet.add(w.address.toLowerCase());
-    saveProgress({ startedAt: cycleStart, total, done: Array.from(doneSet), results });
-
+  const onTask = (info) => {
+    liveTasks.set(info.addr, info);
     renderSpinner();
+  };
 
-    const onTask = (info) => {
-      liveTasks.set(info.addr, info);
-      renderSpinner();
-    };
+  // Worker: ambil 1 wallet dari queue, jalanin, ulangi sampai habis
+  async function worker() {
+    while (true) {
+      const i = nextIdx++;
+      if (i >= pending.length) return;
+      const w = pending[i];
+      const key = w.address.toLowerCase();
 
-    // Jalankan batch paralel
-    const settled = await Promise.allSettled(batch.map((w) => runWallet(w, onTask)));
+      // Pre-register saat mulai → Ctrl+C mid-wallet auto-skip wallet ini di restart
+      doneSet.add(key);
+      saveProgress({ startedAt: cycleStart, total, done: Array.from(doneSet), results });
 
-    for (let k = 0; k < batch.length; k++) {
-      const w = batch[k];
-      liveTasks.delete(w.address);
-      const s = settled[k];
-      if (s.status === 'fulfilled') {
-        results.push(s.value);
-      } else {
-        results.push({ addr: w.address, ok: 0, fail: SEQUENCE.length, secs: '0', error: s.reason?.message });
-        logFile('wallet:err', `${w.address} :: ${s.reason?.message}`);
+      try {
+        const r = await runWallet(w, onTask);
+        results.push(r);
+      } catch (e) {
+        results.push({ addr: w.address, ok: 0, fail: SEQUENCE.length, secs: '0', error: e?.message });
+        logFile('wallet:err', `${w.address} :: ${e?.message}`);
+      } finally {
+        liveTasks.delete(w.address);
+        completed++;
+        renderSpinner();
+        saveProgress({ startedAt: cycleStart, total, done: Array.from(doneSet), results });
       }
-      completed++;
     }
-    renderSpinner();
-
-    saveProgress({ startedAt: cycleStart, total, done: Array.from(doneSet), results });
   }
+
+  // Spawn N workers paralel, tunggu semua habis
+  const workers = Array.from({ length: concurrency }, () => worker());
+  await Promise.all(workers);
 
   restoreConsole();
 
