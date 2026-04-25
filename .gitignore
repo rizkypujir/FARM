@@ -6,7 +6,6 @@ test-wallet.txt
 logs/
 *.log
 .farm-progress.json
-scripts/checkProgress.js
 artifacts/
 cache/
 typechain-types/
