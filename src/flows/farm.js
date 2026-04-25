@@ -202,13 +202,15 @@ async function runFarmOnce() {
   const liveTasks = new Map(); // addr -> { taskIdx, taskName }
   const batches = Math.ceil(pending.length / BATCH_SIZE);
   let batchIdx = 0;
-  let walletsDoneInCycle = 0;
+  // Counter real-completed untuk display (beda dari doneSet yang include pre-registered).
+  // Start dari jumlah wallet yang sudah selesai di cycle sebelumnya (resume case).
+  let completed = doneSet.size;
 
   const renderSpinner = () => {
     const live = [...liveTasks.entries()]
       .map(([addr, t]) => `${shortAddr(addr)}[${t.taskIdx}/${t.taskTotal}]`)
       .join(' ');
-    spinner.text = `Batch ${batchIdx}/${batches}  done=${doneSet.size}/${total}  active: ${live || '-'}`;
+    spinner.text = `Batch ${batchIdx}/${batches}  done=${completed}/${total}  active: ${live || '-'}`;
   };
 
   for (let b = 0; b < pending.length; b += BATCH_SIZE) {
@@ -239,8 +241,9 @@ async function runFarmOnce() {
         results.push({ addr: w.address, ok: 0, fail: SEQUENCE.length, secs: '0', error: s.reason?.message });
         logFile('wallet:err', `${w.address} :: ${s.reason?.message}`);
       }
-      walletsDoneInCycle++;
+      completed++;
     }
+    renderSpinner();
 
     saveProgress({ startedAt: cycleStart, total, done: Array.from(doneSet), results });
   }
