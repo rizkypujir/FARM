@@ -56,6 +56,9 @@ const MIN_USDC_FARM = process.env.MIN_USDC_FARM || '0.05';
 // Naikin ke 5-10 kalau pakai RPC private (Alchemy/QuickNode) dengan rate limit tinggi.
 // Note: tiap wallet jalanin 14 task, jadi batch=3 = 3 tx concurrent ke RPC saja, bukan 14×3.
 const BATCH_SIZE = Number(process.env.BATCH_SIZE || 3);
+// Deadline per wallet (ms). Kalau 1 wallet jalan lebih dari ini, sisa task di-skip.
+// Mencegah wallet "stuck nonce" nahan slot pool. Default 10 menit.
+const WALLET_DEADLINE_MS = Number(process.env.WALLET_DEADLINE_MS || 600000);
 
 // Urutan task penuh (sequential per wallet)
 const SEQUENCE = [
@@ -138,8 +141,19 @@ async function runWallet(wallet, onTask) {
   }
   const eurcRequiredTasks = new Set(['selfTransferEurc', 'randomTransferEurc']);
 
+  let deadlineHit = false;
   for (let i = 0; i < SEQUENCE.length; i++) {
     const t = SEQUENCE[i];
+
+    // Cek deadline — kalau wallet udah jalan terlalu lama, skip sisa task
+    if (Date.now() - t0 > WALLET_DEADLINE_MS) {
+      deadlineHit = true;
+      const remaining = SEQUENCE.length - i;
+      logFile('wallet:deadline', `${wallet.address} hit ${WALLET_DEADLINE_MS}ms deadline at task ${i + 1}/${SEQUENCE.length}, skipping ${remaining} remaining`);
+      fail += remaining;
+      break;
+    }
+
     if (onTask) onTask({ addr: wallet.address, taskIdx: i + 1, taskTotal: SEQUENCE.length, taskName: t.name });
 
     // Skip task yang butuh EURC kalau saldo kurang
@@ -161,7 +175,7 @@ async function runWallet(wallet, onTask) {
   }
 
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
-  return { ok, fail, secs, addr: wallet.address };
+  return { ok, fail, secs, addr: wallet.address, deadlineHit };
 }
 
 async function runFarmOnce() {
